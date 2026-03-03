@@ -10,14 +10,18 @@ dotenv.config();
 const app = express();
 
 // ── CORS ──
+const allowedOrigins = [
+  process.env.FRONTEND_URL, // deployed frontend
+  "http://localhost:5173"   // local dev
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: [process.env.FRONTEND_URL, "http://localhost:5173"],
+    origin: allowedOrigins,
     methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
-app.use(express.json());
 
 // ── SUPABASE CLIENT ──
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
