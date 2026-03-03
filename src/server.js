@@ -125,7 +125,4 @@ app.delete("/api/history/:id", authenticateToken, (req, res) => {
   );
 });
 
-// ---------------- Start Server ----------------
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+export default app;
