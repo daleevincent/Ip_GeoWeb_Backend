@@ -11,7 +11,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-// Connect to SQLite
+// Connect to SQLite (serverless-safe)
 const db = new sqlite3.Database("./database.sqlite", (err) => {
   if (err) console.error("DB Connection Error:", err);
   else console.log("Database connected");
@@ -20,20 +20,20 @@ const db = new sqlite3.Database("./database.sqlite", (err) => {
 app.use(cors());
 app.use(express.json());
 
-// JWT Middleware
+// ---------------- JWT Middleware ----------------
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
   if (!token) return res.sendStatus(401);
 
-  jwt.verify(token, "secretkey", (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) return res.sendStatus(403);
     req.user = user;
     next();
   });
 };
 
-// Initialize Tables without 'name'
+// ---------------- Initialize Tables ----------------
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -53,7 +53,7 @@ db.serialize(() => {
   `);
 });
 
-// Seeder without 'name'
+// ---------------- Auto Seeder (IMPORTANT) ----------------
 const seedUser = async () => {
   const passwordHash = await bcrypt.hash("123456", 10);
   db.run(
@@ -61,13 +61,13 @@ const seedUser = async () => {
     ["test@example.com", passwordHash],
     (err) => {
       if (err) console.log("Seeder Error:", err);
-      else console.log("Default user seeded: test@example.com / 123456");
+      else console.log("Default user ready: test@example.com / 123456");
     }
   );
 };
 seedUser();
 
-// Login API
+// ---------------- Login API ----------------
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
 
@@ -78,17 +78,21 @@ app.post("/api/login", (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(400).json({ message: "Invalid email or password" });
 
-    const token = jwt.sign({ id: user.id, email: user.email }, "secretkey", { expiresIn: "1h" });
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
     res.json({ token });
   });
 });
 
-// Get User History
+// ---------------- Get User History ----------------
 app.get("/api/history", authenticateToken, (req, res) => {
-  const userId = req.user.id;
   db.all(
     "SELECT * FROM ip_history WHERE user_id = ? ORDER BY timestamp DESC",
-    [userId],
+    [req.user.id],
     (err, rows) => {
       if (err) return res.status(500).json({ message: "Database error" });
       res.json(rows);
@@ -96,38 +100,32 @@ app.get("/api/history", authenticateToken, (req, res) => {
   );
 });
 
-// Save New IP History
+// ---------------- Save IP ----------------
 app.post("/api/history", authenticateToken, (req, res) => {
-  const { ip } = req.body;
-  const userId = req.user.id;
-
   db.run(
     "INSERT INTO ip_history (user_id, ip) VALUES (?, ?)",
-    [userId, ip],
+    [req.user.id, req.body.ip],
     function (err) {
       if (err) return res.status(500).json({ message: "Database error" });
-      res.json({ id: this.lastID, ip });
+      res.json({ id: this.lastID, ip: req.body.ip });
     }
   );
 });
 
-// Delete History Item
+// ---------------- Delete IP ----------------
 app.delete("/api/history/:id", authenticateToken, (req, res) => {
-  const { id } = req.params;
-  const userId = req.user.id;
-
   db.run(
     "DELETE FROM ip_history WHERE id = ? AND user_id = ?",
-    [id, userId],
+    [req.params.id, req.user.id],
     function (err) {
       if (err) return res.status(500).json({ message: "Database error" });
-      if (this.changes === 0) return res.status(404).json({ message: "History not found" });
-      res.json({ message: "Deleted successfully" });
+      if (!this.changes) return res.status(404).json({ message: "Not found" });
+      res.json({ message: "Deleted" });
     }
   );
 });
 
-// Start Server
+// ---------------- Start Server ----------------
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
