@@ -1,174 +1,127 @@
-// src/server.js
 import express from "express";
-import sqlite3 from "sqlite3";
+import cors from "cors";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import cors from "cors";
 import dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
-const JWT_SECRET = process.env.JWT_SECRET || "secretkey";
 
-app.use(cors());
+// ── CORS ──
+app.use(
+  cors({
+    origin: [process.env.FRONTEND_URL, "http://localhost:5173"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 app.use(express.json());
 
-/* =====================================================
-   SQLite Database
-   ===================================================== */
-const dbFile = path.join(__dirname, "database.sqlite");
-const db = new sqlite3.Database(dbFile, (err) => {
-  if (err) console.error("DB Connection Error:", err);
-  else console.log("Database connected:", dbFile);
-});
+// ── SUPABASE CLIENT ──
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Initialize tables
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT UNIQUE,
-      password TEXT
-    )
-  `);
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS ip_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER,
-      ip TEXT,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-});
-
-// Seed default user
-const seedUser = async () => {
-  const passwordHash = await bcrypt.hash("123456", 10);
-  db.run(
-    `INSERT OR IGNORE INTO users (email, password) VALUES (?, ?)`,
-    ["test@example.com", passwordHash],
-    (err) => {
-      if (err) console.error("Seeder Error:", err);
-      else console.log("Default user seeded: test@example.com / 123456");
-    }
-  );
-};
-seedUser();
-
-/* =====================================================
-   JWT Middleware
-   ===================================================== */
-export const authenticateToken = (req, res, next) => {
+// ── JWT MIDDLEWARE ──
+const authenticateToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1];
-
   if (!token) return res.status(401).json({ message: "Missing token" });
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ message: "Invalid token" });
     req.user = user;
     next();
   });
 };
 
-/* =====================================================
-   LOGIN API
-   ===================================================== */
-app.post("/api/login", (req, res) => {
+// ── LOGIN ──
+app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ message: "Email and password are required" });
 
-  db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
-    if (err) {
-      console.error("Login DB Error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    if (!user) return res.status(400).json({ message: "Invalid email or password" });
+  const { data: user, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("email", email)
+    .single();
 
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(400).json({ message: "Invalid email or password" });
+  if (error || !user)
+    return res.status(400).json({ message: "Invalid email or password" });
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email },
-      JWT_SECRET,
-      { expiresIn: "1h" }
-    );
+  const match = await bcrypt.compare(password, user.password);
+  if (!match) return res.status(400).json({ message: "Invalid email or password" });
 
-    res.json({ token });
+  const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, {
+    expiresIn: "1h",
   });
+
+  res.json({ token });
 });
 
-/* =====================================================
-   IP HISTORY APIs
-   ===================================================== */
-
-/* Get history */
-app.get("/api/history", authenticateToken, (req, res) => {
-  db.all(
-    "SELECT * FROM ip_history WHERE user_id = ? ORDER BY timestamp DESC",
-    [req.user.id],
-    (err, rows) => {
-      if (err) {
-        console.error("Get history error:", err);
-        return res.status(500).json({ message: "Database error" });
-      }
-      res.json(rows);
-    }
-  );
-});
-
-/* Save history */
-app.post("/api/history", authenticateToken, (req, res) => {
+// ── SAVE HISTORY ──
+// ── SAVE HISTORY ──
+app.post("/api/history", authenticateToken, async (req, res) => {
   const { ip } = req.body;
   if (!ip) return res.status(400).json({ message: "IP is required" });
 
-  db.run(
-    "INSERT INTO ip_history (user_id, ip) VALUES (?, ?)",
-    [req.user.id, ip],
-    function (err) {
-      if (err) {
-        console.error("Insert history error:", err);
-        return res.status(500).json({ message: "Database error" });
-      }
-      res.json({ id: this.lastID, ip });
+  try {
+    // Insert history using service role key (backend can bypass RLS)
+    const { data, error } = await supabase
+      .from("ip_history")
+      .insert([{ user_id: req.user.id, ip }])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Supabase insert error:", error);
+      return res.status(500).json({ message: "Failed to save search history" });
     }
-  );
+
+    res.json(data);
+  } catch (err) {
+    console.error("Server error saving history:", err);
+    res.status(500).json({ message: "Server error saving history" });
+  }
 });
 
-/* Delete history */
-app.delete("/api/history/:id", authenticateToken, (req, res) => {
+// ── GET HISTORY ──
+app.get("/api/history", authenticateToken, async (req, res) => {
+  const { data, error } = await supabase
+    .from("ip_history")
+    .select("*")
+    .eq("user_id", req.user.id)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Failed to fetch history:", error);
+    return res.status(500).json({ message: "Database error" });
+  }
+
+  res.json(data);
+});
+
+// ── DELETE HISTORY ──
+app.delete("/api/history/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
 
-  db.run(
-    "DELETE FROM ip_history WHERE id = ? AND user_id = ?",
-    [id, req.user.id],
-    function (err) {
-      if (err) {
-        console.error("Delete history error:", err);
-        return res.status(500).json({ message: "Database error" });
-      }
-      if (this.changes === 0) return res.status(404).json({ message: "History not found" });
-      res.json({ message: "Deleted successfully" });
-    }
-  );
+  const { error } = await supabase
+    .from("ip_history")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", req.user.id);
+
+  if (error) return res.status(500).json({ message: "Database error" });
+  res.json({ message: "Deleted" });
 });
 
-/* Health check */
-app.get("/", (_, res) => {
-  res.send("IP Geo API with SQLite is running 🚀");
-});
+// ── HEALTH CHECK ──
+app.get("/", (_, res) => res.send("API running 🚀"));
 
-/* =====================================================
-   LOCAL SERVER (DEV ONLY)
-   ===================================================== */
+const PORT = process.env.PORT || 8000;
 if (process.env.NODE_ENV !== "production") {
-  const PORT = process.env.PORT || 8000;
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
