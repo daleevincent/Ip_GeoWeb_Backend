@@ -5,6 +5,7 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import cors from "cors";
 import dotenv from "dotenv";
+import axios from "axios";
 
 dotenv.config();
 
@@ -24,6 +25,7 @@ app.use(express.json());
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
+
   if (!token) return res.sendStatus(401);
 
   jwt.verify(token, "secretkey", (err, user) => {
@@ -33,7 +35,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Initialize Tables without 'name'
+// Initialize Tables
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -53,9 +55,10 @@ db.serialize(() => {
   `);
 });
 
-// Seeder without 'name'
+// Seed Default User
 const seedUser = async () => {
   const passwordHash = await bcrypt.hash("123456", 10);
+
   db.run(
     `INSERT OR IGNORE INTO users (email, password) VALUES (?, ?)`,
     ["test@example.com", passwordHash],
@@ -65,27 +68,44 @@ const seedUser = async () => {
     }
   );
 };
+
 seedUser();
 
-// Login API
+// =======================
+// 🔐 AUTH ROUTES
+// =======================
+
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
 
-  db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
-    if (err) return res.status(500).json({ message: "Database error" });
-    if (!user) return res.status(400).json({ message: "Invalid email or password" });
+  db.get(
+    "SELECT * FROM users WHERE email = ?",
+    [email],
+    async (err, user) => {
+      if (err) return res.status(500).json({ message: "Database error" });
+      if (!user) return res.status(400).json({ message: "Invalid email or password" });
 
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(400).json({ message: "Invalid email or password" });
+      const match = await bcrypt.compare(password, user.password);
+      if (!match) return res.status(400).json({ message: "Invalid email or password" });
 
-    const token = jwt.sign({ id: user.id, email: user.email }, "secretkey", { expiresIn: "1h" });
-    res.json({ token });
-  });
+      const token = jwt.sign(
+        { id: user.id, email: user.email },
+        "secretkey",
+        { expiresIn: "1h" }
+      );
+
+      res.json({ token });
+    }
+  );
 });
 
-// Get User History
+// =======================
+// 📜 HISTORY ROUTES (Moved Up)
+// =======================
+
 app.get("/api/history", authenticateToken, (req, res) => {
   const userId = req.user.id;
+
   db.all(
     "SELECT * FROM ip_history WHERE user_id = ? ORDER BY timestamp DESC",
     [userId],
@@ -96,7 +116,6 @@ app.get("/api/history", authenticateToken, (req, res) => {
   );
 });
 
-// Save New IP History
 app.post("/api/history", authenticateToken, (req, res) => {
   const { ip } = req.body;
   const userId = req.user.id;
@@ -111,7 +130,6 @@ app.post("/api/history", authenticateToken, (req, res) => {
   );
 });
 
-// Delete History Item
 app.delete("/api/history/:id", authenticateToken, (req, res) => {
   const { id } = req.params;
   const userId = req.user.id;
@@ -122,12 +140,40 @@ app.delete("/api/history/:id", authenticateToken, (req, res) => {
     function (err) {
       if (err) return res.status(500).json({ message: "Database error" });
       if (this.changes === 0) return res.status(404).json({ message: "History not found" });
+
       res.json({ message: "Deleted successfully" });
     }
   );
 });
 
-// Start Server
+// =======================
+// 🌐 IP GEOLOCATION ROUTES
+// =======================
+
+// Get current IP info
+app.get("/api", async (req, res) => {
+  try {
+    const response = await axios.get("https://ipinfo.io/json");
+    res.json(response.data);
+  } catch (err) {
+    console.error("IP Fetch Error:", err.message);
+    res.status(500).json({ message: "Failed to fetch IP info" });
+  }
+});
+
+// ✅ FIXED: Changed route from /api/:ip to /api/lookup/:ip
+app.get("/api/lookup/:ip", async (req, res) => {
+  const { ip } = req.params;
+
+  try {
+    const response = await axios.get(`https://ipinfo.io/${ip}/json`);
+    res.json(response.data);
+  } catch (err) {
+    console.error("IP Fetch Error:", err.message);
+    res.status(500).json({ message: "Failed to fetch IP info" });
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
